@@ -89,6 +89,7 @@ const defaultSettings = Object.freeze({
     snippetsPerLayer: 20,
     snippetsPerPromotion: 3,
     maxLayers: 5,
+    autoDeleteDepth: 0,        // 0 = off; N = summaries reaching layer N are deleted automatically
     injectionTemplate: '\n\n<auto_injected_historical_context>\n[system guidance: this is a historical summary of messages that occurred prior to the oldest assistant message currently in context for this chat]\n{{summary}}\n</auto_injected_historical_context>\n\n',
 
     summarizerSystemPrompt:
@@ -1416,9 +1417,30 @@ async function showCatchupDialog(overflowCount, estimatedCalls) {
 
 // ─── Core: Layer Promotion ("ception") ──────────────────────────────
 
+/**
+ * Delete every snippet sitting in the auto-delete depth layer.
+ * Catches content that arrived by import or before the setting was enabled.
+ * Returns the number of snippets removed (0 when the feature is off).
+ */
+function pruneAutoDeleteDepth() {
+    const s = getSettings();
+    const store = getChatStore();
+    const depth = Number(s.autoDeleteDepth) || 0;
+    if (depth <= 0 || !store.layers) return 0;
+
+    const layer = store.layers[depth];
+    if (!layer || layer.length === 0) return 0;
+
+    const removed = layer.splice(0, layer.length).length;
+    log(`Auto-delete: removed ${removed} snippet(s) at depth ${depth}`);
+    return removed;
+}
+
 async function maybePromoteLayer(layerIndex) {
     const s = getSettings();
     const store = getChatStore();
+
+    pruneAutoDeleteDepth();
 
     if (layerIndex >= s.maxLayers - 1) {
         log(`Max layer depth (${s.maxLayers}) reached.`);
@@ -1429,6 +1451,23 @@ async function maybePromoteLayer(layerIndex) {
     if (!layer || layer.length <= s.snippetsPerLayer) return;
 
     log(`Layer ${layerIndex}: ${layer.length} snippets > limit ${s.snippetsPerLayer} → promoting`);
+
+    // Auto-delete: the next promotion would land on the auto-delete depth, where
+    // the result is deleted immediately. Drop the oldest snippets here instead and
+    // skip the LLM call that would otherwise build a summary we throw away.
+    if (s.autoDeleteDepth > 0 && layerIndex + 1 === s.autoDeleteDepth) {
+        const discarded = layer.splice(0, Math.max(1, s.snippetsPerPromotion));
+        log(`Auto-delete: discarded ${discarded.length} snippet(s) that reached depth ${s.autoDeleteDepth}`);
+        toastr.info(
+            `Auto-deleted ${discarded.length} snippet(s) at depth ${s.autoDeleteDepth}`,
+            'Summaryception',
+            { timeOut: TUNING.toastDefault }
+        );
+        if (layer.length > s.snippetsPerLayer) {
+            await maybePromoteLayer(layerIndex);
+        }
+        return;
+    }
 
     if (!store.layers[layerIndex + 1]) store.layers[layerIndex + 1] = [];
     const destLayer = store.layers[layerIndex + 1];
@@ -1676,6 +1715,8 @@ function updateUI() {
         $('#sc_snippets_per_promotion_val').text(s.snippetsPerPromotion);
         $('#sc_max_layers').val(s.maxLayers);
         $('#sc_max_layers_val').text(s.maxLayers);
+        $('#sc_auto_delete_depth').val(s.autoDeleteDepth);
+        $('#sc_auto_delete_depth_val').text(s.autoDeleteDepth === 0 ? 'Off' : s.autoDeleteDepth);
         $('#sc_injection_template').val(s.injectionTemplate);
         $('#sc_summarizer_system_prompt').val(s.summarizerSystemPrompt);
         $('#sc_summarizer_user_prompt').val(s.summarizerUserPrompt);
@@ -2031,6 +2072,25 @@ function bindUIEvents() {
             updateInjection();
         });
     }
+
+    $(document).on('input', '#sc_auto_delete_depth', async function () {
+        const val = parseInt($(this).val(), 10) || 0;
+        getSettings().autoDeleteDepth = val;
+        $('#sc_auto_delete_depth_val').text(val === 0 ? 'Off' : val);
+        saveSettings();
+
+        const removed = pruneAutoDeleteDepth();
+        if (removed > 0) {
+            await saveChatStore();
+            toastr.info(
+                `Auto-deleted ${removed} existing snippet(s) at depth ${val}`,
+                'Summaryception',
+                { timeOut: TUNING.toastDefault }
+            );
+        }
+        updateInjection();
+        updateUI();
+    });
 
     const textareas = [
         { id: '#sc_injection_template', key: 'injectionTemplate' },
@@ -2459,6 +2519,7 @@ function bindUIEvents() {
         s.snippetsPerLayer = defaultSettings.snippetsPerLayer;
         s.snippetsPerPromotion = defaultSettings.snippetsPerPromotion;
         s.maxLayers = defaultSettings.maxLayers;
+        s.autoDeleteDepth = defaultSettings.autoDeleteDepth;
 
         // Reset prompts
         s.summarizerSystemPrompt = defaultSettings.summarizerSystemPrompt;
@@ -2647,134 +2708,4 @@ async function refreshOllamaModels() {
         toastr.success(`Found ${models.length} Ollama model(s)`, 'Summaryception');
     } catch (error) {
         console.error('[Summaryception] Failed to fetch Ollama models:', error);
-        showConnectionStatus('error', `Failed: ${error.message}`);
-        toastr.error(`Failed to fetch Ollama models: ${error.message}`, 'Summaryception');
-    }
-}
-
-async function testOpenAIConnectionHandler() {
-    const s = getSettings();
-
-    if (!s.openaiUrl) {
-        toastr.warning('Please enter an endpoint URL first.', 'Summaryception');
-        return;
-    }
-    if (!s.openaiModel) {
-        toastr.warning('Please enter a model name first.', 'Summaryception');
-        return;
-    }
-
-    showConnectionStatus('loading', 'Testing connection...');
-
-    const result = await testOpenAIConnection(s.openaiUrl, s.openaiKey, s.openaiModel);
-
-    if (result.success) {
-        showConnectionStatus('success', result.message);
-        toastr.success(result.message, 'Summaryception');
-    } else {
-        showConnectionStatus('error', result.message);
-        toastr.error(result.message, 'Summaryception');
-    }
-}
-
-function showConnectionStatus(type, message) {
-    const container = document.getElementById('summaryception_connection_status');
-    const icon = document.getElementById('summaryception_connection_status_icon');
-    const text = document.getElementById('summaryception_connection_status_text');
-
-    if (!container || !icon || !text) return;
-
-    container.style.display = 'flex';
-    container.className = 'summaryception-connection-status ' + type;
-
-    const icons = {
-        success: 'fa-solid fa-circle-check',
-        error: 'fa-solid fa-circle-xmark',
-        loading: 'fa-solid fa-spinner fa-spin',
-    };
-
-    icon.className = icons[type] || 'fa-solid fa-circle';
-    text.textContent = message;
-
-    if (type !== 'loading') {
-        setTimeout(() => {
-            if (container) container.style.display = 'none';
-        }, TUNING.connectionStatusTimeout);
-    }
-}
-
-async function fetchProfilesFallback(selectElement, currentValue) {
-    try {
-        const response = await fetch('/api/connection-manager/profiles', {
-            method: 'GET',
-            headers: SillyTavern.getContext().getRequestHeaders?.() || {
-                'Content-Type': 'application/json',
-            },
-        });
-
-        if (!response.ok) {
-            console.warn('[Summaryception] Could not fetch connection profiles from API');
-            return;
-        }
-
-        const profiles = await response.json();
-
-        selectElement.innerHTML = '<option value="">-- Select a Profile --</option>';
-
-        if (Array.isArray(profiles)) {
-            for (const profile of profiles) {
-                const opt = document.createElement('option');
-                opt.value = profile.id || profile.name;
-                opt.textContent = profile.name || profile.id;
-                selectElement.appendChild(opt);
-            }
-        } else if (typeof profiles === 'object') {
-            for (const [id, profile] of Object.entries(profiles)) {
-                const opt = document.createElement('option');
-                opt.value = id;
-                opt.textContent = profile.name || id;
-                selectElement.appendChild(opt);
-            }
-        }
-
-        if (currentValue) {
-            selectElement.value = currentValue;
-        }
-    } catch (error) {
-        console.warn('[Summaryception] Could not fetch connection profiles:', error);
-    }
-}
-
-// ─── Initialization ──────────────────────────────────────────────────
-
-(async function init() {
-    const {
-        eventSource,
-        event_types,
-        renderExtensionTemplateAsync,
-    } = SillyTavern.getContext();
-
-    getSettings();
-
-    const html = await renderExtensionTemplateAsync(
-        'third-party/Extension-Summaryception',
-        'settings',
-        {}
-    );
-    $('#extensions_settings2').append(html);
-
-    bindUIEvents();
-    initConnectionUI();
-
-    eventSource.on(event_types.MESSAGE_RECEIVED, onMessageReceived);
-    eventSource.on(event_types.CHAT_CHANGED, onChatChanged);
-    eventSource.on(event_types.GENERATION_STARTED, onGenerationStarted);
-
-    registerSlashCommands();
-
-    eventSource.on(event_types.APP_READY, () => {
-        updateInjection();
-        updateUI();
-        console.log(LOG_PREFIX, 'v5.5.4 loaded. Connection Settings available');
-    });
-})();
+    
