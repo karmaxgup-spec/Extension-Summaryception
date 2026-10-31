@@ -272,7 +272,7 @@
                             <small class="sc-hint">When exceeded, oldest snippets are promoted (re-summarized) into a deeper layer.</small>
                         </label>
                         <div class="sc-slider-row">
-                            <input type="range" id="sc_snippets_per_layer" min="3" max="100" step="1" />
+                            <input type="range" id="sc_snippets_per_layer" min="1" max="100" step="1" />
                             <span id="sc_snippets_per_layer_val" class="sc-val">20</span>
                         </div>
                     </div>
@@ -296,6 +296,17 @@
                         <div class="sc-slider-row">
                             <input type="range" id="sc_max_layers" min="1" max="10" step="1" />
                             <span id="sc_max_layers_val" class="sc-val">5</span>
+                        </div>
+                    </div>
+
+                    <div class="sc-row">
+                        <label for="sc_auto_delete_depth">
+                            <span>Auto-Delete at Depth</span>
+                            <small class="sc-hint">Any summary that reaches this layer depth is deleted automatically. 0 = off.</small>
+                        </label>
+                        <div class="sc-slider-row">
+                            <input type="range" id="sc_auto_delete_depth" min="0" max="10" step="1" />
+                            <span id="sc_auto_delete_depth_val" class="sc-val">0</span>
                         </div>
                     </div>
 
